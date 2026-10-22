@@ -105,7 +105,9 @@ FPM 也会强制关闭 HTTP 响应中的错误输出，避免污染 JSON 和图�
 
    标签必须满足 `docker-v主版本.次版本.补丁版本-r构建修订号`，修订号从 `1` 开始。
    推送已存在的普通上游版本标签不会触发镜像发布，也无需创建 GitHub Release。
-4. 发布任务通过 Buildx/QEMU 构建 amd64、arm64 候选镜像，
+4. 发布任务通过 Buildx 在原生 runner 上分别构建 amd64、arm64 候选镜像：
+   amd64 使用 `ubuntu-24.04`，arm64 使用 `ubuntu-24.04-arm`，不再使用 QEMU 模拟。
+   每个任务会先确认 runner 架构与目标架构一致，再构建并运行镜像检查。
    拉取各自的精确 digest 做轻量检查。两者全部通过后才发布多架构版本标签和别名。
    失败的构建可能留下无正式标签的候选包版本，但不会更新正式标签。
 5. 首次发布后，在个人主页 **Packages → easyimages2.0 → Package settings → Change visibility**
