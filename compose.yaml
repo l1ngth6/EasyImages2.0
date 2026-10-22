@@ -1,0 +1,17 @@
+services:
+  easyimage:
+    image: ghcr.io/l1ngth6/easyimages2.0:php8.4
+    ports:
+      - '8080:80'
+    environment:
+      TZ: Asia/Shanghai
+      PUID: '1000'
+      PGID: '1000'
+      DEBUG: 'false'
+    volumes:
+      - './config:/app/web/config'
+      - './images/i:/app/web/i'
+      # 可选：持久化应用统计、上传记录、登录日志等。
+      # - './logs:/app/web/admin/logs'
+    restart: unless-stopped
+    stop_grace_period: 70s
