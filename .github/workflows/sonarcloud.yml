@@ -29,10 +29,8 @@
 name: SonarCloud analysis
 
 on:
-  push:
-    branches: [ "master" ]
-  pull_request:
-    branches: [ "master" ]
+  # Temporarily disable automatic scans until SonarCloud credentials and keys
+  # are configured. Restore push/pull_request triggers to re-enable them.
   workflow_dispatch:
 
 permissions:
