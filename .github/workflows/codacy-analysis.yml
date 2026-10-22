@@ -9,13 +9,9 @@
 name: Codacy Security Scan
 
 on:
-  push:
-    branches: [ master ]
-  pull_request:
-    # The branches below must be a subset of the branches above
-    branches: [ master ]
-  schedule:
-    - cron: '17 9 * * 2'
+  # Automatic scans are paused until the scanner configuration is maintained.
+  # Keep manual execution available; restore triggers here to re-enable scans.
+  workflow_dispatch:
 
 jobs:
   codacy-security-scan:
