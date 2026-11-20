@@ -130,7 +130,9 @@ expect_status /healthz 403
 expect_status /install/index.php 404
 expect_status /does-not-exist.php 404
 test "$(curl --silent --show-error --fail --max-time 15 "$base/i/keep.txt?quiet-marker")" = keep-image
-if docker logs "$container" 2>&1 | grep -q 'GET /i/keep.txt?quiet-marker'; then
+# Neither Nginx nor PHP-FPM may log requests here, including health checks.
+logs=$(docker logs "$container" 2>&1)
+if grep -qE 'GET /(i/keep\.txt\?quiet-marker|healthz|ci-diagnostic\.php)' <<<"$logs"; then
     echo 'DEBUG=false unexpectedly emitted access logs.' >&2
     exit 1
 fi

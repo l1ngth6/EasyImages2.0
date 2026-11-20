@@ -44,7 +44,8 @@ docker compose logs --tail=100
 
 ### 升级到 2.8.7 的注意事项
 
-应用 2.8.7 合并了上游安全加固，其中多项改动不向后兼容。完整列表见 [上游更新日志](update.md) 的「升级注意」。
+应用 2.8.7（镜像 `2.8.7-r4` 起）合并了上游安全加固，其中多项改动不向后兼容。
+按步骤操作的升级清单见 [README](../README.md#升级到-287-r4-及以上需要手动处理)，完整列表见 [上游更新日志](update.md) 的「升级注意」。
 
 - **旧口令自动转换**：2.8.7 起只接受 bcrypt 口令，旧版以 SHA256 保存的管理员、上传者口令会无法登录。
   容器启动时会把 `config.php`、`config.guest.php` 中这类口令转换为 bcrypt，原密码可以继续登录。
@@ -116,6 +117,8 @@ Compose 的相对路径以 Compose 文件所在目录为基准。
 | `/app/web/admin/logs` | 可选持久化：应用统计、上传、登录等记录 |
 | `/logs` | 可选持久化：DEBUG 关闭时的 Nginx 访问日志 |
 
+访问日志只由 Nginx 记录，按 `DEBUG` 写入 `docker logs` 或 `/logs/nginx_access.log`，健康检查请求不记录；
+PHP-FPM 不单独记录访问日志（`2.8.7-r5` 起）。
 PHP 及进程错误始终进入 `docker logs`。即使应用尝试打开 `display_errors`，
 FPM 也会强制关闭 HTTP 响应中的错误输出，避免污染 JSON 和图片响应。
 
