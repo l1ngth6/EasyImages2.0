@@ -3,17 +3,19 @@
  * 登录页面
  */
 require_once __DIR__ . '/../app/function.php';
+// 安全：登录页在任何 HTML 输出前建立会话，确保 output_buffering=Off 时 Set-Cookie 仍有效
+_session_boot(true);
 require_once APP_ROOT . '/app/header.php';
 require_once APP_ROOT . '/config/config.guest.php';
 
 // 退出
-if (isset($_GET['login'])) {
-    if ($_GET['login'] = 'logout') {
-
-        if (isset($_COOKIE['auth'])) {
-            setcookie('auth', null, time() - 1, '/');
-            header("Refresh:2;url=../index.php");
-            echo '
+if (isset($_GET['login']) && $_GET['login'] === 'logout') {
+    // 登出前判断是否已登录（登出会销毁会话）
+    $was_logged = is_who_login('status');
+    _logout();
+    if ($was_logged) {
+        header("Refresh:2;url=../index.php");
+        echo '
 				<script>
 					new $.zui.Messager("退出成功", {
 						type: "success", // 定义颜色主题 
@@ -23,8 +25,8 @@ if (isset($_GET['login'])) {
 					window.setTimeout("window.location=\'../index.php\'",2000);
 				</script>
         ';
-        } else {
-            echo '
+    } else {
+        echo '
 				<script>
 				new $.zui.Messager("尚未登录", {
 					type: "danger", // 定义颜色主题 
@@ -34,7 +36,6 @@ if (isset($_GET['login'])) {
 				window.setTimeout("window.location=\'./index.php\'",2000);
 				</script>
         ';
-        }
     }
     exit(require_once APP_ROOT . '/app/footer.php');
 }
@@ -44,7 +45,8 @@ if (isset($_POST['password']) and isset($_POST['user'])) {
 
     // 验证码
     if ($config['captcha']) {
-        if (empty($_REQUEST['code'])) {
+        $codeRequest = isset($_REQUEST['code']) && is_string($_REQUEST['code']) ? $_REQUEST['code'] : '';
+        if ($codeRequest === '') {
             echo '
             <script>
                 new $.zui.Messager("请填写验证码!", {type: "danger" // 定义颜色主题 
@@ -54,8 +56,8 @@ if (isset($_POST['password']) and isset($_POST['user'])) {
             </script>';
             exit(require_once APP_ROOT . '/app/footer.php');
         } else {
-            session_start();
-            if (strtolower($_REQUEST['code']) !== $_SESSION['code']) {
+            // 验证码未生成时按空串比对（不读未定义下标）
+            if (strtolower($codeRequest) !== ($_SESSION['code'] ?? '')) {
                 echo '
                 <script>
                     new $.zui.Messager("验证码错误!", {type: "danger" // 定义颜色主题 
@@ -92,7 +94,7 @@ if (isset($_POST['password']) and isset($_POST['user'])) {
     }
 
     // 登录日志
-    write_login_log($_POST['user'], $_POST['password'], $login["messege"]);
+    write_login_log($_POST['user'], $login["messege"]);
 }
 ?>
 <link rel="stylesheet" href="<?php static_cdn(); ?>/public/static/login.css">
@@ -108,7 +110,7 @@ if (isset($_POST['password']) and isset($_POST['user'])) {
             </div>
             <div class="modal-body">
                 <p class="text-primary">忘记账号可以打开<code>/config/config.php</code>文件找到<code data-toggle="tooltip" title="'user'=><strong>admin</strong>'">user</code>对应的键值->填入</p>
-                <p class="text-success">忘记密码请将密码转换成SHA256(<a href="<?php echo $config['domain'] . '/app/reset_password.php'; ?>" target="_blank" class="text-purple">转换网址</a>)->打开<code>/config/config.php</code>文件->找到<code data-toggle="tooltip" title="'password'=>'<strong>e6e0612609</strong>'">password</code>对应的键值->填入</p>
+                <p class="text-success">忘记密码请在此输入明文密码生成加密串（加盐 bcrypt，<a href="<?php echo $config['domain'] . '/app/reset_password.php'; ?>" target="_blank" class="text-purple">转换网址</a>）->打开<code>/config/config.php</code>文件->找到<code data-toggle="tooltip" title="'password'=>'<strong>$2y$12$...</strong>'">password</code>对应的键值->粘贴填入</p>
                 <h4 class="text-danger">更改后会立即生效并重新登录,请务必牢记账号和密码! </h4>
             </div>
             <div class="modal-footer">

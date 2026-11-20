@@ -10,6 +10,10 @@ case "$DEBUG" in
     true|false) ;;
     *) echo 'DEBUG must be true or false.' >&2; exit 1 ;;
 esac
+case "$EASYIMAGE_MIGRATE_LEGACY_PASSWORDS" in
+    true|false) ;;
+    *) echo 'EASYIMAGE_MIGRATE_LEGACY_PASSWORDS must be true or false.' >&2; exit 1 ;;
+esac
 case "$TZ" in
     ''|/*|*..*) echo 'TZ must name a zone in /usr/share/zoneinfo.' >&2; exit 1 ;;
 esac
@@ -44,6 +48,15 @@ for directory in /app/web/config /app/web/i /app/web/admin/logs /logs; do
     find "$directory" -xdev \( ! -uid "$PUID" -o ! -gid "$PGID" \) \
         -exec chown --no-dereference "$PUID:$PGID" '{}' +
 done
+
+# EasyImage 2.8.7 rejects the SHA256 password hashes of older releases. Convert
+# them as the application user: root must not execute the writable config files.
+if [ "$EASYIMAGE_MIGRATE_LEGACY_PASSWORDS" = true ]; then
+    if ! setpriv --reuid="$PUID" --regid="$PGID" --clear-groups \
+        php /usr/local/share/easyimage/migrate-legacy-passwords.php; then
+        echo 'Some legacy passwords were not converted; see the messages above.' >&2
+    fi
+fi
 
 if [ "$DEBUG" = true ]; then
     printf 'access_log /dev/stdout combined;\n' > /etc/nginx/easyimage-access-log.conf

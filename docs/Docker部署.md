@@ -39,8 +39,41 @@ docker compose logs --tail=100
 ```
 
 验证管理员登录、网页/API 上传、已有图片直链、缩略图、水印、压缩和删除。
-旧配置不自动重写或升级；如果升级后的应用新增配置项，可通过后台检查并保存配置。
-如果自定义过图片根目录（默认 `/i/`），还需为相应容器路径挂载数据并调整 Nginx 的 PHP 禁执行规则。
+除下文的旧口令转换外，旧配置不会被自动重写。
+如果自定义过图片根目录（默认 `/i/`），还需为相应容器路径挂载数据，并调整 Nginx 中针对 `/i/` 的规则。
+
+### 升级到 2.8.7 的注意事项
+
+应用 2.8.7 合并了上游安全加固，其中多项改动不向后兼容。完整列表见 [上游更新日志](update.md) 的「升级注意」。
+
+- **旧口令自动转换**：2.8.7 起只接受 bcrypt 口令，旧版以 SHA256 保存的管理员、上传者口令会无法登录。
+  容器启动时会把 `config.php`、`config.guest.php` 中这类口令转换为 bcrypt，原密码可以继续登录。
+  只替换口令值，文件其余内容不变；原文件保存为同目录的 `*.legacy-sha256.bak`（权限 600，Web 不可访问）。
+  旧版登录日志可能记录过口令摘要，建议转换后在后台修改密码。
+  上游出厂示例上传者 `guest` 的密码是公开的，不会转换，请在后台删除该账号。
+  转换以 `PUID`/`PGID` 身份运行，失败时会在容器日志中说明原因，失败的文件保持原样。
+  设置 `EASYIMAGE_MIGRATE_LEGACY_PASSWORDS=false` 可关闭转换，此时可手动生成新口令（输入密码后回车，输出替换 `config.php` 中 `password` 的值）：
+
+  ```bash
+  docker compose exec easyimage php -r 'echo password_hash(hash("sha256", rtrim(fgets(STDIN), "\r\n")), PASSWORD_BCRYPT, ["cost" => 12]), PHP_EOL;'
+  ```
+
+- **需要重新登录**：登录状态改为服务端 Session，保存在容器内；重建容器后也需要重新登录。
+- **加密链接失效**：旧的删除链接和源图保护（`hide.php`）链接全部失效；修改管理员密码也会使删除链接失效。
+  普通图片直链不受影响。
+- **新增配置项**：后台只保存配置文件中已有的配置项。启动日志会列出旧 `config.php` 缺少的项，
+  需要时从镜像内 `/opt/easyimage-defaults/config/config.php` 复制对应行，例如 `token_suffix_ID`。
+
+### 反向代理与访问者 IP
+
+访问者 IP 的获取方式与上游一致：直连地址为内网/回环地址，或命中后台 `trusted_proxy` 名单时，
+才采用 `X-Forwarded-For` 中的地址，否则使用直连地址。IP 黑白名单、游客上传限额和日志都依赖该地址。
+
+- 反向代理与本容器在同一 Docker 网络（例如 Nginx Proxy Manager）时，直连地址是内网地址，无需额外配置；
+  代理需要传递 `X-Forwarded-For`。
+- 公网 CDN 或代理直接连接本容器时，需在后台 `trusted_proxy` 中填写其出口 IP。
+- 内网中的直连客户端也能自行设置该请求头。只通过反向代理访问时，建议去掉 Compose 中的 `ports`，
+  或只绑定 `127.0.0.1`。
 
 回滚时先停止新容器，恢复升级前的备份及旧镜像配置，再启动旧服务。
 测试期间应用可能已经写入配置或数据，回滚应使用升级前备份。
@@ -69,6 +102,7 @@ Compose 的相对路径以 Compose 文件所在目录为基准。
 | `PUID` | `1000` | PHP/Nginx 工作进程对应的用户 ID，接受非负整数 |
 | `PGID` | `1000` | 对应组 ID，接受非负整数 |
 | `DEBUG` | `false` | 仅接受 `true` 或 `false`；开启后将访问日志输出到容器日志 |
+| `EASYIMAGE_MIGRATE_LEGACY_PASSWORDS` | `true` | 仅接受 `true` 或 `false`；启动时将旧版 SHA256 口令转换为 bcrypt，见上文 |
 
 原有显式 UID/GID（包括 `0`）继续支持；新部署建议使用非零 ID。
 启动时会将 `/app/web/config`、`/app/web/i`、`/app/web/admin/logs`、`/logs`
@@ -135,7 +169,8 @@ ghcr.io/l1ngth6/easyimages2.0:latest
 ## 验证范围与本地环境
 
 GitHub Actions 检查 PHP 语法、8.4 最低补丁版本、扩展、GD 格式支持、Nginx/FPM 配置、
-健康检查、空目录初始化、已有文件保留、UID/GID、重启、访问限制、JSON 响应和日志行为。
+健康检查、空目录初始化、已有文件保留、UID/GID、重启、访问限制、SVG 等安全响应头、
+旧口令转换与登录、JSON 响应和日志行为。
 这些是合成数据的轻量检查，不能替代真实旧数据的功能回归。
 所有测试容器和数据目录均在临时 runner 中创建，脚本退出时只清理自己的容器及临时目录。
 

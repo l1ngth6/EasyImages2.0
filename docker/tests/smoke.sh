@@ -25,6 +25,7 @@ start() {
         --platform "${TEST_PLATFORM:-linux/amd64}" \
         --publish 127.0.0.1::80 \
         --env "PUID=${2:-1000}" --env "PGID=${3:-1000}" --env TZ=Asia/Shanghai --env "DEBUG=$1" \
+        --env "EASYIMAGE_MIGRATE_LEGACY_PASSWORDS=${4:-true}" \
         --mount "type=bind,src=$work/config,dst=/app/web/config" \
         --mount "type=bind,src=$work/images/i,dst=/app/web/i" \
         --mount "type=bind,src=$work/logs,dst=/app/web/admin/logs" \
@@ -49,6 +50,14 @@ expect_status() {
     actual=$(curl --silent --show-error --max-time 15 --output /dev/null --write-out '%{http_code}' "$base$1")
     if [[ "$actual" != "$2" ]]; then
         echo "$1: expected HTTP $2, received $actual" >&2
+        return 1
+    fi
+}
+
+expect_header() {
+    if ! curl --silent --show-error --fail --max-time 15 --dump-header - --output /dev/null "$base$1" | \
+        tr -d '\r' | grep -qixF "$2"; then
+        echo "$1: missing response header: $2" >&2
         return 1
     fi
 }
@@ -105,13 +114,18 @@ docker exec "$container" sh -c '
     printf "<?php echo 123;" > /app/web/i/probe.php
     printf "<?php echo 123;" > /app/web/i/probe.PHP
     printf "<?php echo 123;" > /app/web/public/probe.php
+    printf "<?php echo 123;" > /app/web/i/probe.pht
+    printf "<svg xmlns=\"http://www.w3.org/2000/svg\"/>" > /app/web/i/probe.svg
 '
 before=$(docker exec "$container" sh -c \
     'sha256sum /app/web/config/*.php /app/web/config/install.lock /app/web/i/keep.txt /app/web/admin/logs/keep.txt')
 for path in /config/config.php /config /admin/logs/keep.txt /docs/README.md \
-    /.git/config /i/.htaccess /i/probe.php /i/probe.PHP /public/probe.php; do
+    /.git/config /i/.htaccess /i/probe.php /i/probe.PHP /i/probe.pht /public/probe.php; do
     expect_status "$path" 403
 done
+expect_header /i/probe.svg 'Content-Security-Policy: sandbox'
+expect_header /i/probe.svg 'X-Content-Type-Options: nosniff'
+expect_header /i/keep.txt 'X-Content-Type-Options: nosniff'
 expect_status /healthz 403
 expect_status /install/index.php 404
 expect_status /does-not-exist.php 404
@@ -139,6 +153,71 @@ test "$before" = "$after"
 expect_status /install/index.php 404
 curl --silent --show-error --fail --max-time 15 "$base/i/keep.txt?debug-marker" >/dev/null
 expect_log 'GET /i/keep.txt?debug-marker'
+
+# Pre-2.8.7 releases stored SHA256(password); startup converts it to bcrypt.
+# Synthetic passwords only. Browsers submit SHA256(password) when logging in.
+admin_digest=$(printf %s smoke-admin-password | sha256sum | cut -d' ' -f1)
+uploader_digest=$(printf %s smoke-uploader-password | sha256sum | cut -d' ' -f1)
+sample_digest=84983c60f7daadc1cb8698621f802c0d9f9a3c3c295c810748fb048115c186ec
+docker exec -i --user 1000:1000 "$container" php -- "$admin_digest" "$uploader_digest" "$sample_digest" <<'PHP'
+<?php
+$file = '/app/web/config/config.php';
+$text = preg_replace("/'password'=>'[^']*'/", "'password'=>'$argv[1]'", file_get_contents($file), 1, $count);
+$text = preg_replace("/^\s*'trusted_proxy'=>'[^']*',\R/m", '', $text, 1, $removed);
+if ($count !== 1 || $removed !== 1 || file_put_contents($file, $text) === false) {
+    exit(1);
+}
+$guests = "<?php\r\n\$guestConfig=Array\r\n\t(\r\n"
+    . "\t'uploader'=>Array\r\n\t\t(\r\n\t\t'password'=>'$argv[2]',\r\n"
+    . "\t\t'expired'=>" . (time() + 86400) . ",\r\n\t\t'add_time'=>" . time() . "\r\n\t\t),\r\n"
+    . "\t'guest'=>Array\r\n\t\t(\r\n\t\t'password'=>'$argv[3]',\r\n"
+    . "\t\t'expired'=>1765301956,\r\n\t\t'add_time'=>1678988356\r\n\t\t)\r\n\t);";
+exit(file_put_contents('/app/web/config/config.guest.php', $guests) === false ? 1 : 0);
+PHP
+accounts() {
+    docker exec "$container" sha256sum /app/web/config/config.php /app/web/config/config.guest.php
+}
+legacy=$(accounts)
+
+docker rm --force "$container" >/dev/null
+start false 1000 1000 false
+test "$(accounts)" = "$legacy"
+
+docker rm --force "$container" >/dev/null
+start false
+expect_log 'config.php: converted 1 legacy SHA256 password(s) to bcrypt'
+expect_log 'config.guest.php: converted 1 legacy SHA256 password(s) to bcrypt'
+expect_log "left example uploader 'guest' unconverted"
+expect_log 'config.php lacks settings that the bundled defaults define: trusted_proxy.'
+docker exec "$container" php -r '
+    include "/app/web/config/config.php";
+    include "/app/web/config/config.guest.php";
+    exit(password_verify($argv[1], $config["password"])
+        && password_verify($argv[2], $guestConfig["uploader"]["password"])
+        && $guestConfig["guest"]["password"] === $argv[3] ? 0 : 1);
+' "$admin_digest" "$uploader_digest" "$sample_digest"
+docker exec "$container" grep -qF "$admin_digest" /app/web/config/config.php.legacy-sha256.bak
+test "$(docker exec "$container" stat -c '%a %u:%g' /app/web/config/config.php.legacy-sha256.bak)" = '600 1000:1000'
+expect_status /config/config.php.legacy-sha256.bak 403
+
+login() {
+    curl --silent --show-error --fail --max-time 30 \
+        --data-urlencode "user=$1" --data-urlencode "password=$2" "$base/admin/index.php"
+}
+response=$(login admin "$admin_digest")
+grep -qF '管理员登录成功' <<<"$response"
+response=$(login uploader "$uploader_digest")
+grep -qF 'uploader用户登录成功' <<<"$response"
+response=$(login admin "$uploader_digest")
+grep -qF '账号或密码错误' <<<"$response"
+
+# Converted files are left alone on later starts.
+migrated=$(accounts)
+docker restart --time 70 "$container" >/dev/null
+ready
+test "$(accounts)" = "$migrated"
+before=$(docker exec "$container" sh -c \
+    'sha256sum /app/web/config/*.php /app/web/config/install.lock /app/web/i/keep.txt /app/web/admin/logs/keep.txt')
 
 # The old image also allowed explicitly setting both IDs to zero.
 docker rm --force "$container" >/dev/null

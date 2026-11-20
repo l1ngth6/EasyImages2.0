@@ -4,7 +4,8 @@ FROM php:8.4-fpm-bookworm
 ENV TZ=Asia/Shanghai \
     PUID=1000 \
     PGID=1000 \
-    DEBUG=false
+    DEBUG=false \
+    EASYIMAGE_MIGRATE_LEGACY_PASSWORDS=true
 
 # CI changes this value on every run so apt security updates are not cached.
 ARG DEPENDENCY_REFRESH=local
@@ -48,7 +49,8 @@ COPY docker/container/fastcgi.conf /etc/nginx/easyimage-fastcgi.conf
 COPY docker/container/php.ini /usr/local/etc/php/conf.d/99-easyimage.ini
 COPY docker/container/php-fpm.conf /usr/local/etc/php-fpm.d/zzzz-easyimage.conf
 COPY docker/container/supervisord.conf /etc/supervisor/easyimage.conf
-COPY docker/container/health.php docker/container/check-runtime.php /usr/local/share/easyimage/
+COPY docker/container/health.php docker/container/check-runtime.php \
+    docker/container/migrate-legacy-passwords.php /usr/local/share/easyimage/
 COPY --chmod=755 docker/container/entrypoint.sh /usr/local/bin/easyimage-entrypoint
 COPY --chmod=755 docker/container/healthcheck.sh /usr/local/bin/easyimage-healthcheck
 
@@ -58,6 +60,7 @@ RUN set -eux; \
     cp -a i/. /opt/easyimage-defaults/i/; \
     chmod 755 app/upload.php; \
     find /app/web /usr/local/share/easyimage -type f -name '*.php' -print0 | xargs -0 -n1 php -l; \
+    command -v setpriv; \
     php /usr/local/share/easyimage/check-runtime.php
 
 EXPOSE 80

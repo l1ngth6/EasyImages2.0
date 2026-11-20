@@ -1,15 +1,21 @@
 <?php
 require_once __DIR__ . '/../app/function.php';
-// 存在程序锁则跳转主页
+// 存在程序锁或已完成安装则跳转主页（防止已上线站点被人重新安装接管）
 if (file_exists(APP_ROOT . '/config/install.lock')) {
-    exit(header("Location:/../index.php"));
+    header("Location: ../index.php");
+    exit;
+}
+if (!isset($config['password']) || !password_verify(EASYIMAGE_DEFAULT_PASSWORD_HASH, (string) $config['password'])) {
+    // 非默认密码说明站点已安装，给可读提示而非静默跳回（避免与首页 check.php 构成重定向环）
+    exit('<script>window.alert("站点已完成安装，如需重装请手动删除 config/install.lock 并恢复默认密码。");location.href="../index.php";</script>');
 }
 
 // 验证上一步环境检测
-$state = isset($_POST['check']) ? $_POST['check'] : exit(header("Location:index.php"));
-if ($state !== 'checked') {
-    exit(header("Location:index.php"));
+if (!isset($_POST['check']) || $_POST['check'] !== 'checked') {
+    header("Location: index.php");
+    exit;
 }
+$state = $_POST['check'];
 
 ?>
 <!DOCTYPE html>
@@ -66,20 +72,20 @@ if ($state !== 'checked') {
             <div class="form-group">
                 <label class="col-sm-2 ">管理账号</label>
                 <div class="col-md-6 col-sm-10">
-                    <input type="text" class="form-control" name="user" value="admin" placeholder="请以大小写英文或数字输入管理员账号" onkeyup="this.value=this.value.replace(/[^\w\.\/]/ig,'')">
+                    <input type="text" class="form-control" name="user" value="admin" placeholder="字母开头，可含数字与 . _ -" onkeyup="this.value=this.value.replace(/[^\w.\-]/g,'')">
                 </div>
             </div>
             <div class="form-group">
                 <label class="col-sm-2 ">管理密码</label>
-                <span class="message">请输入8~18位密码</span>
+                <span class="message">请输入8~64位密码</span>
                 <div class="col-md-6 col-sm-10 register">
-                    <input type="text" class="form-control inp" name="password" value="admin@123" required="required" placeholder="请使用英文输入法输入密码并不小于8位数" onkeyup="this.value=this.value.replace(/\s/g,'')">
+                    <input type="text" class="form-control inp" name="password" value="" required="required" placeholder="请设置自定义管理密码（8~64位，勿使用出厂默认）" onkeyup="this.value=this.value.replace(/\s/g,'')">
                 </div>
             </div>
             <div class="form-group">
                 <label class="col-sm-2 ">确认密码</label>
                 <div class="col-md-6 col-sm-10">
-                    <input type="text" class="form-control" name="repassword" value="admin@123" required="required" placeholder="确认密码" onkeyup="this.value=this.value.replace(/\s/g,'')">
+                    <input type="text" class="form-control" name="repassword" value="" required="required" placeholder="确认密码" onkeyup="this.value=this.value.replace(/\s/g,'')">
                 </div>
             </div>
             <div class="form-group">
@@ -129,8 +135,8 @@ if ($state !== 'checked') {
         var message = document.querySelector('.message');
 
         password.onblur = function() {
-            if (this.value.length < 8 || this.value.length > 18) {
-                message.innerHTML = '密码长度错误,应为8~18位';
+            if (this.value.length < 8 || this.value.length > 64) {
+                message.innerHTML = '密码长度错误,应为8~64位';
                 message.className = 'message wrong';
             } else {
                 message.innerHTML = '密码长度正确';
@@ -178,7 +184,7 @@ if ($state !== 'checked') {
             <!-- 对话框触发按钮 -->
             <a href="#" data-position="center" data-moveable="inside" data-moveable="true" data-toggle="modal" data-target="#myModal"><i class="icon icon-qrcode"></i>二维码 </a>
         </div>
-        <?php echo 'Copyright © 2018' . date('-Y'); ?> <a href="https://png.cm" target="_blank">EasyImage</a> By Icret Version:<a href="https://github.com/icret/EasyImages2.0" target="_blank"> <?php echo APP_VERSION; ?></a>
+        <?php echo 'Copyright © 2018' . date('-Y'); ?> <a href="https://calc.appsr.cn" target="_blank">EasyImage</a> By Icret Version:<a href="https://github.com/icret/EasyImages2.0" target="_blank"> <?php echo APP_VERSION; ?></a>
     </footer>
 </body>
 
