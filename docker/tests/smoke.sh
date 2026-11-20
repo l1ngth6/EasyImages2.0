@@ -10,7 +10,7 @@ cleanup() {
     result=$?
     trap - EXIT
     if (( result != 0 )); then
-        docker logs "$container" >&2 2>/dev/null || true
+        { docker logs "$container" 2>&1; } >&2 || true
     fi
     docker rm --force "$container" >/dev/null 2>&1 || true
     # Startup changes ownership; delete only this script's temporary fixture.
@@ -131,8 +131,11 @@ expect_status /install/index.php 404
 expect_status /does-not-exist.php 404
 test "$(curl --silent --show-error --fail --max-time 15 "$base/i/keep.txt?quiet-marker")" = keep-image
 # Neither Nginx nor PHP-FPM may log requests here, including health checks.
+# Access log lines end the request with `" <status>`; Nginx error log lines
+# (such as the denied external /healthz request) continue with `", host`.
 logs=$(docker logs "$container" 2>&1)
-if grep -qE 'GET /(i/keep\.txt\?quiet-marker|healthz|ci-diagnostic\.php)' <<<"$logs"; then
+access_line='"GET /(i/keep\.txt\?quiet-marker|healthz|ci-diagnostic\.php)[^"]*" [0-9]{3}'
+if grep -E "$access_line" <<<"$logs" >&2; then
     echo 'DEBUG=false unexpectedly emitted access logs.' >&2
     exit 1
 fi
