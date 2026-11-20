@@ -2,6 +2,9 @@
 
 namespace Verot\Upload;
 
+// API 为 Token 鉴权的无状态入口，不需要服务端登录会话
+define('EASYIMAGE_NO_SESSION', true);
+
 require_once __DIR__ . '/../app/function.php';
 require_once APP_ROOT . '/app/class.upload.php';
 require_once APP_ROOT . '/config/api_key.php';
@@ -9,11 +12,17 @@ require_once APP_ROOT . '/config/api_key.php';
 // 允许跨域 https://stackoverflow.com/questions/8719276/cross-origin-request-headerscors-with-php-headers
 header("Access-Control-Max-Age: 3600");
 header("Access-Control-Allow-Origin: *");
-header("Access-Control-Allow-Credentials: true");
-header("Access-Control-Allow-Methods: PUT, POST, GET, OPTIONS, DELETE");
+// Token 鉴权为无状态模式，不使用 Cookie；通配来源不能与 Allow-Credentials 同时使用
+header("Access-Control-Allow-Methods: POST, OPTIONS");
 header("Access-Control-Allow-Headers: X-Requested-With, Content-Type, Origin, Cache-Control, Pragma, Authorization, Accept, Accept-Encoding");
 // 定义返回头信息为Json
 header("Content-type: application/json; charset=utf-8");
+
+// 预检请求直接放行，避免被“没有文件”分支拒绝
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
+    http_response_code(204);
+    exit;
+}
 
 // 无文件
 if (empty($_FILES['image'])) {
@@ -39,18 +48,19 @@ if ($config['check_ip']) {
     }
 }
 
-// 获取Token并过滤非字母数字, 删除空格
-$token = preg_replace('/[\W]/', '', $_POST['token']);
+// 获取Token并过滤非字母数字, 删除空格（数组型入参按非法处理）
+$rawToken = isset($_POST['token']) ? $_POST['token'] : '';
+$token = is_string($rawToken) ? preg_replace('/[\W]/', '', $rawToken) : '';
 
 // 检查api合法性
 check_api($token);
-$tokenID = $tokenList[$token]['id'];
+$tokenID = isset($tokenList[$token]['id']) ? (int) $tokenList[$token]['id'] : 0;
 
 // 分片上传
 if (!$config['chunks']) {
     $handle = new Upload($_FILES['image'], 'zh_CN');
 } else {
-    $chunk = chunk($_POST['name']);
+    $chunk = chunk(isset($_POST['name']) ? $_POST['name'] : '');
     $handle = new Upload($chunk, 'zh_CN');
 }
 
@@ -60,10 +70,23 @@ if ($handle->uploaded) {
         $handle->allowed = array('image/*');
     }
 
-    // 检查svg是否存在script和a标签代码
-    if ($handle->file_src_name_ext === 'svg') {
-        $svg = file_get_contents($handle->file_src_pathname);
-        if (preg_match('/<script[\s\S]*?<\/script>/', $svg) || stripos($svg, 'href=')) {
+    // 服务端扩展名白名单（防止合法图片内容 + .php 扩展名落盘）
+    $allowedExtensions = array_values(array_filter(array_map('trim', explode(',', strtolower((string) ($config['extensions'] ?? ''))))));
+    $srcExtension = strtolower((string) $handle->file_src_name_ext);
+    if ($allowedExtensions === array() || !in_array($srcExtension, $allowedExtensions, true)) {
+        exit(json_encode(
+            array(
+                "result"  => "failed",
+                "code"    => 205,
+                "message" => "不允许的文件类型",
+            ),
+            JSON_UNESCAPED_UNICODE
+        ));
+    }
+
+    // 检查 SVG 是否包含脚本/事件/外部引用（扩展名统一小写，避免 .SVG 绕过）
+    if (strtolower((string) $handle->file_src_name_ext) === 'svg') {
+        if (!is_safe_svg($handle->file_src_pathname)) {
             exit(json_encode(
                 array(
                     "result"  => "failed",
@@ -138,13 +161,13 @@ if ($handle->uploaded) {
         if ($config['hide_path']) {
             $imageUrl = str_replace($config['path'], '/', $imageUrl);
         }
-        // 源图保护 key值是由crc32加密的hide_key
+        // 源图保护 key：由 urlHash('hide') 认证加密的路径令牌
         if ($config['hide']) {
-            $imageUrl = $config['domain'] . '/app/hide.php?key=' . urlHash($pathIMG, 0, crc32($config['hide_key']));
+            $imageUrl = $config['domain'] . '/app/hide.php?key=' . urlHash($pathIMG, 0, 'hide');
         }
         // 删除文件链接
         if ($config['show_user_hash_del']) {
-            $delUrl = $config['domain'] . '/app/del.php?hash=' . urlHash($pathIMG, 0);
+            $delUrl = $config['domain'] . '/app/del.php?hash=' . urlHash($pathIMG, 0, 'del');
         } else {
             $delUrl = "Admin closed user delete";
         }

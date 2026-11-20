@@ -34,7 +34,8 @@ if (empty($_FILES['file'])) {
 }
 
 // sign : 前端生成的时间戳 time() - $_POST['sign'] = 从选择文件到上传完毕的耗费时间
-if (empty($_POST['sign']) || time() - $_POST['sign'] > 12306) {
+$uploadSign = isset($_POST['sign']) ? (int) $_POST['sign'] : 0;
+if ($uploadSign <= 0 || time() - $uploadSign > 12306) {
     exit(json_encode(
         array(
             "result"  => "failed",
@@ -77,8 +78,7 @@ if ($config['ip_upload_counts'] > 0 && !is_who_login('status')) {
 
 // 分片上传
 if ($config['chunks']) {
-    $chunk = chunk($_POST['name']);
-    // exit($chunk);
+    $chunk = chunk(isset($_POST['name']) ? $_POST['name'] : '');
     $handle = new Upload($chunk, 'zh_CN');
 } else {
     $handle = new Upload($_FILES['file'], 'zh_CN');
@@ -90,10 +90,23 @@ if ($handle->uploaded) {
         $handle->allowed = array('image/*');
     }
 
-    // 检查svg是否存在script和a标签代码
-    if ($handle->file_src_name_ext === 'svg') {
-        $svg = file_get_contents($handle->file_src_pathname);
-        if (preg_match('/<script[\s\S]*?<\/script>/', $svg) || stripos($svg, 'href=')) {
+    // 服务端扩展名白名单：仅靠 MIME 校验时，合法图片内容 + .php 文件名仍可能落盘为脚本
+    $allowedExtensions = array_values(array_filter(array_map('trim', explode(',', strtolower((string) ($config['extensions'] ?? ''))))));
+    $srcExtension = strtolower((string) $handle->file_src_name_ext);
+    if ($allowedExtensions === array() || !in_array($srcExtension, $allowedExtensions, true)) {
+        exit(json_encode(
+            array(
+                "result"  => "failed",
+                "code"    => 406,
+                "message" => "不允许的文件类型",
+            ),
+            JSON_UNESCAPED_UNICODE
+        ));
+    }
+
+    // 检查 SVG 是否包含脚本/事件/外部引用（扩展名统一小写，避免 .SVG 绕过）
+    if (strtolower((string) $handle->file_src_name_ext) === 'svg') {
+        if (!is_safe_svg($handle->file_src_pathname)) {
             exit(json_encode(
                 array(
                     "result"  => "failed",
@@ -156,8 +169,7 @@ if ($handle->uploaded) {
     // 开启上传者单独目录
     if ($config['guest_path_status']) {
         if (checkLogin() === 205) {
-            $getCok = json_decode($_COOKIE['auth']);
-            $Img_path = config_path($getCok[0] . date('/Y/m/d/'));
+            $Img_path = config_path(login_username() . date('/Y/m/d/'));
         }
     }
 
@@ -194,15 +206,14 @@ if ($handle->uploaded) {
             $imageUrl = str_replace($config['path'], '/', $imageUrl);
         }
 
-        // 源图保护 key值是由crc32加密的hide_key
-        // $hide_original = $config['hide'] == 1 ? $config['domain'] . '/app/hide.php?key=' . urlHash($pathIMG, 0, crc32($config['hide_key'])) : $imageUrl;
+        // 源图保护 key：由 urlHash('hide') 认证加密的路径令牌
         if ($config['hide'] === 1) {
-            $imageUrl = $config['domain'] . '/app/hide.php?key=' . urlHash($pathIMG, 0, crc32($config['hide_key']));
+            $imageUrl = $config['domain'] . '/app/hide.php?key=' . urlHash($pathIMG, 0, 'hide');
         }
 
         // 删除文件链接
         if ($config['show_user_hash_del']) {
-            $delUrl = $config['domain'] . '/app/del.php?hash=' . urlHash($pathIMG, 0);
+            $delUrl = $config['domain'] . '/app/del.php?hash=' . urlHash($pathIMG, 0, 'del');
         } else {
             $delUrl = "Admin closed user delete";
         }

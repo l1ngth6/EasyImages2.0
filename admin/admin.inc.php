@@ -26,29 +26,129 @@ if (!is_who_login('admin')) {
     exit;
 }
 
+// 安全：CSRF 防护。POST 表单由页面 JS 自动补 token；状态变更 GET 链接由服务端拼接 csrf 参数。
+$csrf = csrf_token();
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !csrf_verify(isset($_POST['csrf_token']) ? $_POST['csrf_token'] : '')) {
+    http_response_code(403);
+    exit('CSRF token invalid');
+}
+foreach (array('stop_token', 'delete_token', 'stop_guest', 'delete_guest') as $csrfAction) {
+    if (isset($_GET[$csrfAction]) && !csrf_verify(isset($_GET['csrf']) ? $_GET['csrf'] : '')) {
+        http_response_code(403);
+        exit('CSRF token invalid');
+    }
+}
+
 // 定义文件位置 
 $config_file = APP_ROOT . '/config/config.php'; // config.php
 $api_key_file = APP_ROOT . '/config/api_key.php'; // api_key.php
 $guest_config_file = APP_ROOT . '/config/config.guest.php'; // config.guest.php
 
+// 安全：目录配置只允许站点相对路径，拒绝空字节、反斜杠与父目录上溢
+$sanitizePathConfig = function ($value) {
+    if (!is_string($value)) {
+        return null;
+    }
+    $value = str_replace('\\', '/', trim($value));
+    if ($value === '' || strpos($value, "\0") !== false || preg_match('#(^|/)\.\.(/|$)#', $value)) {
+        return null;
+    }
+    return '/' . trim($value, '/') . '/';
+};
+// 安全：账号须以英文字母开头，仅允许字母/数字与 . _ - ，长度 1~64。
+// 杜绝纯数字名（会被 arrayeval 落成 int，登录会话复核的 === 因 int/string 类型漂移而失效）与中文/斜杠等异常字符。
+$sanitizeAccount = function ($value) {
+    if (!is_string($value)) {
+        return null;
+    }
+    $value = preg_replace('/[\s\/\\\\]+/', '', strip_tags($value));
+    if (!preg_match('/^[A-Za-z][A-Za-z0-9_.\-]{0,63}$/', $value)) {
+        return null;
+    }
+    return $value;
+};
+// 前端提交的是 SHA256 摘要；若为明文（JS 被禁用）则服务端补算。
+// 落盘统一升级为加盐 bcrypt（cost 12），有效摘要=提交摘要或明文补算，与登录校验函数保持同一算法
+$normalizePasswordHash = function ($value) {
+    if (!is_string($value)) {
+        return null;
+    }
+    $value = trim($value);
+    if ($value === '') {
+        return null;
+    }
+    // 协议提交的是 64 位 SHA256 摘要；非摘要视为明文回退，必须满足 8~64 位，杜绝弱明文口令落盘
+    if (!preg_match('/^[a-f0-9]{64}$/', strtolower($value)) && (strlen($value) < 8 || strlen($value) > 64)) {
+        return null;
+    }
+    return easyimage_password_hash($value);
+};
+
 // 修改config配置
 if (isset($_POST['update'])) {
-    $postArr = $_POST;
+    // 只接受已存在的配置键，防止任意 POST 键被写入 config.php
+    $safePost = array_intersect_key($_POST, $config);
 
-    if (isset($postArr['user'])) {
-        if ($postArr['user'] == $guestConfig[$postArr['user']])
+    // 账号改名：校验字符串并禁止与上传者重名
+    if (isset($safePost['user'])) {
+        $newUser = $sanitizeAccount($safePost['user']);
+        if ($newUser === null || (is_array($guestConfig) && isset($guestConfig[$newUser]))) {
             echo '
             <script>
-            new $.zui.Messager("管理员账号不能与上传者账号相同!", {
-                type: "danger", // 定义颜色主题 
-                icon: "exclamation-sign" // 定义消息图标
+            new $.zui.Messager("管理员账号无效或与上传者账号相同!", {
+                type: "danger",
+                icon: "exclamation-sign"
             }).show();
             </script>
             ';
-        exit(header("refresh:1;"));
+            header("refresh:1;");
+            exit;
+        }
+        $safePost['user'] = $newUser;
+    }
+    // 密码：允许留空表示不修改
+    if (isset($safePost['password'])) {
+        // 安全：明文回退路径（JS 被禁用/直接 POST 时）必须验长度，与 $normalizePasswordHash 及安装器的 8~64 位策略对齐，避免弱口令落盘或超长明文静默丢弃
+        $rawPassword = trim((string) $safePost['password']);
+        if ($rawPassword !== '' && !preg_match('/^[a-f0-9]{64}$/i', $rawPassword) && (strlen($rawPassword) < 8 || strlen($rawPassword) > 64)) {
+            echo '
+            <script>
+            new $.zui.Messager("明文密码长度应为 8~64 位!", {
+                type: "danger",
+                icon: "exclamation-sign"
+            }).show();
+            </script>
+            ';
+            header("refresh:1;");
+            exit;
+        }
+        $newPassword = $normalizePasswordHash($safePost['password']);
+        if ($newPassword === null) {
+            unset($safePost['password']);
+        } else {
+            $safePost['password'] = $newPassword;
+        }
+    }
+    // 存储目录/管理员分离目录做路径收敛
+    foreach (array('path', 'admin_path') as $pathKey) {
+        if (isset($safePost[$pathKey])) {
+            $safePathValue = $sanitizePathConfig($safePost[$pathKey]);
+            if ($safePathValue === null) {
+                unset($safePost[$pathKey]);
+            } else {
+                $safePost[$pathKey] = $safePathValue;
+            }
+        }
     }
 
-    $new_config = array_replace($config, $postArr);
+    $new_config = array_replace($config, $safePost);
+
+    // 开启源图保护却仍使用公开默认 Key 时，自动生成随机 Key（旧链接会失效）
+    if (!empty($new_config['hide'])
+        && (empty($new_config['hide_key']) || $new_config['hide_key'] === 'EasyImage2.0')) {
+        $new_config['hide_key'] = bin2hex(random_bytes(16));
+    }
+
     cache_write($config_file, $new_config);
     echo '
   <script>
@@ -68,10 +168,21 @@ if (isset($_POST['update'])) {
  * $_POST['add_token_expired'] 过期时间
  */
 if (isset($_POST['add_token_id'])) {
+    $tokenList = is_array($tokenList) ? $tokenList : array();
+    // Token 只允许字母数字（API 端也会过滤非 \w 字符），ID/有效期做整数收敛
+    $tokenValue = isset($_POST['add_token']) && is_string($_POST['add_token'])
+        ? preg_replace('/[^A-Za-z0-9]/', '', $_POST['add_token'])
+        : '';
+    if ($tokenValue === '') {
+        $tokenValue = privateToken(32);
+    }
+    $tokenId = isset($_POST['add_token_id']) ? (int) $_POST['add_token_id'] : count($tokenList);
+    $tokenDays = isset($_POST['add_token_expired']) ? (int) $_POST['add_token_expired'] : 30;
+    $tokenDays = max(-3650, min(3650, $tokenDays));
     $postArr = array(
-        $_POST['add_token'] => array(
-            'id' => $_POST['add_token_id'],
-            'expired' => $_POST['add_token_expired'] * 86400 + time(),
+        $tokenValue => array(
+            'id' => $tokenId,
+            'expired' => $tokenDays * 86400 + time(),
             'add_time' => time()
         )
     );
@@ -90,12 +201,16 @@ if (isset($_POST['add_token_id'])) {
 
 // 禁用Token 
 if (isset($_GET['stop_token'])) {
-    $stop_token = $_GET['stop_token'];
+    $stop_token = is_string($_GET['stop_token']) ? $_GET['stop_token'] : '';
+    if (!is_array($tokenList) || !isset($tokenList[$stop_token])) {
+        header("refresh:1;url=" . $config['domain'] . "/admin/admin.inc.php");
+        exit;
+    }
     $postArr = array(
         $stop_token => array(
             'id' => 0,
             'expired' => time(),
-            'add_time' => $tokenList[$stop_token]['add_time']
+            'add_time' => isset($tokenList[$stop_token]['add_time']) ? $tokenList[$stop_token]['add_time'] : time()
         )
     );
     $new_config = array_replace($tokenList, $postArr);
@@ -108,12 +223,26 @@ if (isset($_GET['stop_token'])) {
         }).show();
         </script>
   ';
-    header("refresh:1;url=/admin/admin.inc.php");
+    header("refresh:1;url=" . $config['domain'] . "/admin/admin.inc.php");
 }
 
 // 删除Token
 if (isset($_GET['delete_token'])) {
-    unset($tokenList[$_GET['delete_token']]);
+    $deleteToken = is_string($_GET['delete_token']) ? $_GET['delete_token'] : '';
+    // 与禁用分支一致：先验记录存在，不存在时如实提示，不再无条件回显“删除成功”
+    if (!is_array($tokenList) || !isset($tokenList[$deleteToken])) {
+        echo '
+  <script>
+  new $.zui.Messager("API Token 记录不存在!", {
+    type: "danger", // 定义颜色主题 
+    icon: "exclamation-sign" // 定义消息图标
+  }).show();
+  </script>
+  ';
+        header("refresh:1;url=" . $config['domain'] . "/admin/admin.inc.php");
+        exit;
+    }
+    unset($tokenList[$deleteToken]);
     cache_write($api_key_file, $tokenList, 'tokenList');
     echo '
   <script>
@@ -123,17 +252,22 @@ if (isset($_GET['delete_token'])) {
   }).show();
   </script>
   ';
-    header("refresh:1;url=/admin/admin.inc.php");
+    header("refresh:1;url=" . $config['domain'] . "/admin/admin.inc.php");
+    exit;
 }
 
 // 禁用用户
 if (isset($_GET['stop_guest'])) {
-    $stop_guest = $_GET['stop_guest'];
+    $stop_guest = is_string($_GET['stop_guest']) ? $_GET['stop_guest'] : '';
+    if (!is_array($guestConfig) || !isset($guestConfig[$stop_guest])) {
+        header("refresh:1;url=" . $config['domain'] . "/admin/admin.inc.php");
+        exit;
+    }
     $postArr = array(
         $stop_guest => array(
-            'password' => $guestConfig[$stop_guest]['password'],
+            'password' => $guestConfig[$stop_guest]['password'] ?? '',
             'expired' => time(),
-            'add_time' => $guestConfig[$stop_guest]['add_time']
+            'add_time' => $guestConfig[$stop_guest]['add_time'] ?? time()
         )
     );
     $new_config = array_replace($guestConfig, $postArr);
@@ -146,13 +280,27 @@ if (isset($_GET['stop_guest'])) {
         }).show();
         </script>
   ';
-    header("refresh:1;url=/admin/admin.inc.php");
+    header("refresh:1;url=" . $config['domain'] . "/admin/admin.inc.php");
 }
 
 
 // 删除用户
 if (isset($_GET['delete_guest'])) {
-    unset($guestConfig[$_GET['delete_guest']]);
+    $deleteGuest = is_string($_GET['delete_guest']) ? $_GET['delete_guest'] : '';
+    // 与禁用分支一致：先验记录存在，不存在时如实提示
+    if (!is_array($guestConfig) || !isset($guestConfig[$deleteGuest])) {
+        echo '
+  <script>
+  new $.zui.Messager("上传用户记录不存在!", {
+    type: "danger", // 定义颜色主题 
+    icon: "exclamation-sign" // 定义消息图标
+  }).show();
+  </script>
+  ';
+        header("refresh:1;url=" . $config['domain'] . "/admin/admin.inc.php");
+        exit;
+    }
+    unset($guestConfig[$deleteGuest]);
     cache_write($guest_config_file, $guestConfig, 'guestConfig');
     echo '
   <script>
@@ -162,24 +310,27 @@ if (isset($_GET['delete_guest'])) {
   }).show();
   </script>
   ';
-    header("refresh:1;url=/admin/admin.inc.php");
+    header("refresh:1;url=" . $config['domain'] . "/admin/admin.inc.php");
+    exit;
 }
 
 //  添加管理员修改config.php
 if (isset($_POST['admin_form'])) {
-    $postArr = $_POST;
-    if (isset($guestConfig[$postArr['user']])) {
+    $adminUser = isset($_POST['user']) ? $sanitizeAccount($_POST['user']) : null;
+    $adminPassword = isset($_POST['password']) ? $normalizePasswordHash($_POST['password']) : null;
+    if ($adminUser === null || $adminPassword === null || (is_array($guestConfig) && isset($guestConfig[$adminUser]))) {
         echo '
         <script>
-            new $.zui.Messager("管理员账号不能与上传者账号相同!", {
+            new $.zui.Messager("管理员账号格式无效(须字母开头，仅含 字母/数字/._- )、密码为空或与上传者相同!", {
                 type: "danger", // 定义颜色主题 
                 icon: "exclamation-sign" // 定义消息图标
             }).show();
         </script>
         ';
-        exit(header("refresh:3;"));
+        header("refresh:3;");
+        exit;
     }
-    $postArr = array('user' => $postArr['user'], 'password' => $postArr['password']);
+    $postArr = array('user' => $adminUser, 'password' => $adminPassword);
 
     $new_config = array_replace($config, $postArr);
     cache_write($config_file, $new_config);
@@ -196,27 +347,32 @@ if (isset($_POST['admin_form'])) {
 
 // 添加上传账号 修改config.guest.php
 if (isset($_POST['uploader_form'])) {
-    // 禁止与管理员登录名相同
-    if ($_POST['uploader_user'] == $config['user']) {
+    $uploaderUser = isset($_POST['uploader_user']) ? $sanitizeAccount($_POST['uploader_user']) : null;
+    $uploaderPassword = isset($_POST['uploader_password']) ? $normalizePasswordHash($_POST['uploader_password']) : null;
+    $uploaderDays = isset($_POST['uploader_time']) ? (int) $_POST['uploader_time'] : 30;
+    $uploaderDays = max(-3650, min(3650, $uploaderDays));
+    // 禁止与管理员登录名相同，且账号名不能构成路径片段
+    if ($uploaderUser === null || $uploaderPassword === null || $uploaderUser === ($config['user'] ?? '')) {
         echo '
         <script>
-        new $.zui.Messager("上传用户账号不能与管理员账号相同!", {
+        new $.zui.Messager("上传者账号格式无效(须字母开头，仅含 字母/数字/._- )、密码为空或与管理员相同!", {
             type: "danger", // 定义颜色主题 
             icon: "exclamation-sign" // 定义消息图标
         }).show();
         </script>
         ';
-        exit(header("refresh:3;"));
+        header("refresh:3;");
+        exit;
     }
     // 写入上传者用户数据
     $postArr = array(
-        $_POST['uploader_user'] => array(
-            'password' => $_POST['uploader_password'],
-            'expired' => $_POST['uploader_time'] * 86400 + time(),
+        $uploaderUser => array(
+            'password' => $uploaderPassword,
+            'expired' => $uploaderDays * 86400 + time(),
             'add_time' => time()
         )
     );
-    $new_config = array_replace($guestConfig, $postArr);
+    $new_config = array_replace(is_array($guestConfig) ? $guestConfig : array(), $postArr);
     cache_write($guest_config_file, $new_config, 'guestConfig');
     echo '
     <script>
@@ -231,8 +387,11 @@ if (isset($_POST['uploader_form'])) {
 
 // 删除非空目录
 if (isset($_REQUEST['delDir'])) {
-    $delDir = APP_ROOT . $config['path'] . $_REQUEST['delDir'];
-    if (deldir($delDir)) {
+    // 目录收敛，防止删除路径穿越
+    $error = null;
+    $safeDir = resolve_image_path($_REQUEST['delDir'], $error, 'dir');
+    $delDir = $safeDir === false ? null : APP_ROOT . $safeDir;
+    if ($delDir !== null && deldir($delDir)) {
         echo '
 		<script> new $.zui.Messager("删除成功! ", {
 			type: "success", // 定义颜色主题 
@@ -246,7 +405,7 @@ if (isset($_REQUEST['delDir'])) {
 		}).show();</script>';
     }
     // header("refresh:1;"); // 1s后刷新当前页面
-    header("refresh:1;url=/admin/admin.inc.php");
+    header("refresh:1;url=" . $config['domain'] . "/admin/admin.inc.php");
 }
 
 auto_delete(); //定时删除
@@ -330,7 +489,7 @@ auto_delete(); //定时删除
                 <div class="form-group col-md-12">
                     <div class="form-group col-md-1">
                         <label data-toggle="tooltip" title="前后需加'/'">存储目录</label>
-                        <input type="text" class="form-control" name="path" required="required" value="<?php echo $config['path']; ?>" onkeyup="this.value=this.value.replace(/\s/g,'')" title="可根据Apache/Nginx配置安全,参考: https://blog.png.cm/981.html 或 README.md">
+                        <input type="text" class="form-control" name="path" required="required" value="<?php echo $config['path']; ?>" onkeyup="this.value=this.value.replace(/\s/g,'')" title="可根据Apache/Nginx配置安全,参考 README.md">
                     </div>
                     <div class="form-group col-md-2">
                         <label for="storage_path" data-toggle="tooltip" title="图片的分类目录<br>更改会导致广场无法使用<br>非必要不要修改,末尾需要加'/' <br />PHP date() 函数参考">存储分类路径 <a href="https://www.runoob.com/php/php-date.html" target="_blank"><i class="icon icon-external-link"></i></a></label>
@@ -617,6 +776,9 @@ auto_delete(); //定时删除
                                 <label class="radio-inline"><input type="radio" name="check_ip_model" value="0" <?php if ($config['check_ip_model'] == 0) echo 'checked'; ?>> 黑名单模式</label>
                                 <label class="radio-inline"><input type="radio" name="check_ip_model" value="1" <?php if ($config['check_ip_model'] == 1) echo 'checked'; ?>> 白名单模式</label>
                             </div>
+                            <div class="form-group">
+                                <textarea class="form-control" rows="2" name="trusted_proxy" data-toggle="tooltip" title="反代/CDN 场景下才采信 X-Forwarded-For 的代理 IP,每个以英文,结尾 支持IP段 例:104.16.0.0/16写法不支持,可用104.16.*.*" placeholder="仅站点前方有公网反向代理/CDN时填写代理出口IP,内网反代无需填写"><?php echo $config['trusted_proxy'] ?? ''; ?></textarea>
+                            </div>
                         </div>
                         <div class="col-md-6">
                             <div class="form-group">
@@ -896,7 +1058,7 @@ auto_delete(); //定时删除
                                 <td><?php echo $file_size; ?></td>
                                 <td>
                                     <a class="btn btn-mini" href="<?php echo $url; ?>" target="_blank">查看</a>
-                                    <a class="btn btn-mini" href="/app/info.php?img=<?php echo $file_path; ?>" target="_blank">信息</a>
+                                    <a class="btn btn-mini" href="<?php echo $config['domain']; ?>/app/info.php?img=<?php echo $file_path; ?>" target="_blank">信息</a>
                                     <a class="btn btn-mini btn-success" href="#" onclick="ajax_post('<?php echo $filen_name; ?>','suspic_reimg')">恢复</a>
                                     <a class="btn btn-mini btn-danger" href="#" onclick="ajax_post('<?php echo $file_path; ?>','delete')">删除</a>
                                 </td>
@@ -905,16 +1067,24 @@ auto_delete(); //定时删除
                     </tbody>
                 </table>
             </div>
-            <a class="btn btn-mini btn-primary" href="filer.php?path=<?php echo $config['path']; ?>suspic" target="_blank">管理可疑</a>
+            <a class="btn btn-mini btn-primary" href="filer.php?path=/suspic" target="_blank">管理可疑</a>
             <button class="btn btn-mini btn-danger" onclick="ajax_post('/suspic/','delDir')"><?php echo $cache_num; ?>张 | 删除全部</button>
         </div>
         <div class=" tab-pane fade" id="Content8">
+            <?php
+            // CLI/部分 SAPI 下这些 $_SERVER 键可能不存在
+            $serverSoftware = htmlspecialchars((string) ($_SERVER['SERVER_SOFTWARE'] ?? 'unknown'), ENT_QUOTES, 'UTF-8');
+            $serverAddrRaw = (string) ($_SERVER['SERVER_ADDR'] ?? '');
+            $serverAddr = filter_var($serverAddrRaw, FILTER_VALIDATE_IP) ? $serverAddrRaw : '0.0.0.0';
+            $browserInfo = htmlspecialchars((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), ENT_QUOTES, 'UTF-8');
+            $gdVersion = function_exists('gd_info') ? (gd_info()['GD Version'] ?? 'unknown') : 'unknown';
+            ?>
             <div class="alert alert-primary">
                 <h5>系统信息</h5>
                 <hr />
                 <p class="text-ellipsis">服务系统: <?PHP echo php_uname('s'); ?> <small class="text-muted text-ellipsis"><?PHP echo php_uname(); ?></small></p>
-                <p class="text-ellipsis">Web服务: <?PHP echo $_SERVER['SERVER_SOFTWARE']; ?></p>
-                <p class="text-ellipsis">服务器IP: <?PHP echo $_SERVER["SERVER_ADDR"] . ip2region($_SERVER["SERVER_ADDR"]) ?></p>
+                <p class="text-ellipsis">Web服务: <?PHP echo $serverSoftware; ?></p>
+                <p class="text-ellipsis">服务器IP: <?PHP echo $serverAddr . ip2region($serverAddr) ?></p>
                 <p class="text-ellipsis">图床时间: <?PHP echo date("Y-m-d H:i:s"); ?></p>
                 <p class="text-ellipsis"><span class="label label-dot label-success" data-toggle="tooltip" title="当前页面占用内存"></span> 页面占用: <?php echo getDistUsed(memory_get_usage()); ?></p>
                 <p class="text-ellipsis"><span class="label label-dot label-danger" data-toggle="tooltip" title="本页面占用内存最高峰"></span> 占用峰值: <?php echo getDistUsed(memory_get_peak_usage()); ?></p>
@@ -928,13 +1098,13 @@ auto_delete(); //定时删除
                 <p class="text-ellipsis">运行时间限制: <?PHP echo get_cfg_var("max_execution_time") . "s"; ?></p>
                 <p class="text-ellipsis">最大占用内存: <?PHP echo get_cfg_var("memory_limit"); ?></p>
                 <p class="text-ellipsis">POST上传限制: <?php echo ini_get('post_max_size'); ?></p>
-                <p class="text-ellipsis">GD版本: <?php echo (gd_info()["GD Version"]); ?></p>
+                <p class="text-ellipsis">GD版本: <?php echo htmlspecialchars((string) $gdVersion, ENT_QUOTES, 'UTF-8'); ?></p>
                 <h5>我的信息</h5>
                 <hr />
                 <p class="text-ellipsis">IP: <?php echo real_ip() . ip2region(real_ip()); ?></p>
 
                 <p class="text-ellipsis">配置文件更新日期：<?php echo date('Y-m-d H:i:s', filemtime($config_file)); ?></p>
-                <p class="text-ellipsis">Browser: <?php echo $_SERVER['HTTP_USER_AGENT']; ?></p>
+                <p class="text-ellipsis">Browser: <?php echo $browserInfo; ?></p>
                 <h5>图床信息</h5>
                 <hr />
                 <h6>API 插件</h6>
@@ -944,7 +1114,7 @@ auto_delete(); //定时删除
                 <a href="https://icret.github.io/EasyImages2.0/#/./使用PicGo上传" target="_blank"><span class="label label-badge label-primary" data-toggle="tooltip" title="使用PicGo上传">PicGo</span></a>
                 <h6>开发支持</h6>
                 <p>
-                    <a href="https://png.cm/?demo" target="_blank"><span class="label label-badge label-primary" data-toggle="tooltip" title="演示地址"><i class="icon icon-external-link"></i> Demo</span></a>
+                    <a href="https://calc.appsr.cn/?demo" target="_blank"><span class="label label-badge label-primary" data-toggle="tooltip" title="演示地址"><i class="icon icon-external-link"></i> Demo</span></a>
                     <a href="<?php echo is_file(APP_ROOT . '/docs/index.html') ?  '../docs' : 'https://icret.github.io/EasyImages2.0/#/'; ?>" target="_blank"><span class="label label-badge label-primary" data-toggle="tooltip" title="使用手册"><i class="icon icon-book"></i> Manual</span></a>
                     <a href="https://t.me/Easy_Image" target="_blank"><span class="label label-badge label-primary" data-toggle="tooltip" title="EasyImage Telegram Group"><i class="icon icon-comments-alt"></i> Telegram</span></a>
                     <a href="https://github.com/icret/EasyImages2.0/discussions" target="_blank"><span class="label label-badge label-primary" data-toggle="tooltip" title="GitHub 社区"><i class="icon icon-comments-alt"></i> Discuss</span></a>
@@ -1112,7 +1282,7 @@ auto_delete(); //定时删除
                 <div class="col-md-12">
                     <div class="form-group col-md-4">
                         <div class="input-control has-icon-left" data-toggle="tooltip" title="上传者账号只能上传不能操作其他项目">
-                            <input type="text" name="user" id="account" class="form-control" value="<?php echo $config['user']; ?>" required="required" placeholder="更改管理账号" onkeyup="this.value=this.value.replace(/\s/g,'')">
+                            <input type="text" name="user" id="account" class="form-control" value="<?php echo $config['user']; ?>" required="required" placeholder="更改管理账号(字母开头，可含 数字._- )" onkeyup="this.value=this.value.replace(/[^\w.\-]/g,'')">
                             <label for="account" class="input-control-icon-left"><i class="icon icon-user "></i></label>
                         </div>
                     </div>
@@ -1137,7 +1307,7 @@ auto_delete(); //定时删除
                         <li>直接输入账号和密码即可完成修改</li>
                         <li>更改后会立即生效并重新登录,请务必牢记账号和密码! </li>
                         <li>如果忘记账号可以打开-><code>/config/config.php</code>文件->找到<code data-toggle="tooltip" title="'user'=><strong>admin</strong>'">user</code>对应的键值->填入</li>
-                        <li>如果忘记密码请将密码->转换成SHA256-><a href="<?php echo $config['domain'] . '/app/reset_password.php'; ?>" target="_blank" class="text-purple">转换网址</a>->打开<code>/config/config.php</code>文件->找到<code data-toggle="tooltip" title="'password'=>'<strong>e6e0612609</strong>'">password</code>对应的键值->填入</li>
+                        <li>如果忘记密码可用<a href="<?php echo $config['domain'] . '/app/reset_password.php'; ?>" target="_blank" class="text-purple">转换网址</a>将明文口令生成加盐 bcrypt 串->打开<code>/config/config.php</code>文件->找到<code data-toggle="tooltip" title="'password'=>'<strong>$2y$12$...</strong>'">password</code>对应的键值->粘贴填入（若完全锁死，可先用发行包内 config.php 覆盖，再用出厂默认口令 admin@123 登录后立即改密）</li>
                     </ul>
                 </div>
             </div>
@@ -1147,7 +1317,7 @@ auto_delete(); //定时删除
                 <div class="col-md-12">
                     <div class="form-group col-md-3">
                         <div class="input-control has-icon-left" data-toggle="tooltip" title="上传者账号只能上传不能操作其他项目">
-                            <input type="text" name="uploader_user" id="account" class="form-control" value="" required="required" autocomplete="off" placeholder="添加上传者账号" onkeyup="this.value=this.value.replace(/\s/g,'')">
+                            <input type="text" name="uploader_user" id="account" class="form-control" value="" required="required" autocomplete="off" placeholder="添加上传者账号(字母开头，可含 数字._- )" onkeyup="this.value=this.value.replace(/[^\w.\-]/g,'')">
                             <label for="account" class="input-control-icon-left"><i class="icon icon-user "></i></label>
                         </div>
                     </div>
@@ -1242,7 +1412,7 @@ auto_delete(); //定时删除
                                 <td><?php echo $file_size; ?></td>
                                 <td>
                                     <a class="btn btn-mini" href="<?php echo $url; ?>" target="_blank">查看</a>
-                                    <a class="btn btn-mini" href="/app/info.php?img=<?php echo $file_path; ?>" target="_blank">信息</a>
+                                    <a class="btn btn-mini" href="<?php echo $config['domain']; ?>/app/info.php?img=<?php echo $file_path; ?>" target="_blank">信息</a>
                                     <a class="btn btn-mini btn-success" href="#" onclick="ajax_post('<?php echo $filen_name; ?>','recycle_reimg')">恢复</a>
                                     <a class="btn btn-mini btn-danger" href="#" onclick="ajax_post('<?php echo $file_path; ?>','delete')">删除</a>
                                 </td>
@@ -1251,7 +1421,7 @@ auto_delete(); //定时删除
                     </tbody>
                 </table>
             </div>
-            <a class="btn btn-mini btn-primary" href="filer.php?path=<?php echo $config['path']; ?>recycle" target="_blank">管理回收</a>
+            <a class="btn btn-mini btn-primary" href="filer.php?path=/recycle" target="_blank">管理回收</a>
             <button class="btn btn-mini btn-danger" onclick="ajax_post('/recycle/','delDir')"><?php echo $cache_num; ?>张 | 删除全部</button>
         </div>
         <div class="tab-pane fade" id="Content12">
@@ -1367,8 +1537,8 @@ auto_delete(); //定时删除
         </div>
         <div class="tab-pane fade" id="Content14">
             <h5 class="header-dividing">文件管理 <small>由作者定制,非必要请勿替换</small></h5>
-            <a class="btn btn-mini btn-primary" href="/admin/manager.php?p=<?php echo date('Y/m/d'); ?> " target="_blank" data-toggle="tooltip" title="使用Tinyfilemanager管理文件"><i class="icon icon-folder-open"> 文件管理</i></a>
-            <a class="btn btn-mini btn-primary" href="filer.php?path=<?php echo $config['path'] . date('Y/m/d'); ?> " target="_blank" data-toggle="tooltip" title="使用web-indexr管理文件"><i class="icon icon-folder-close"> 文件管理</i></a>
+            <a class="btn btn-mini btn-primary" href="<?php echo $config['domain']; ?>/admin/manager.php?p=<?php echo date('Y/m/d'); ?> " target="_blank" data-toggle="tooltip" title="使用Tinyfilemanager管理文件"><i class="icon icon-folder-open"> 文件管理</i></a>
+            <a class="btn btn-mini btn-primary" href="filer.php?path=<?php echo '/' . date('Y/m/d'); ?>" target="_blank" data-toggle="tooltip" title="使用web-indexr管理文件"><i class="icon icon-folder-close"> 文件管理</i></a>
             <h5 class="header-dividing">删除文件 <small>* 删除后不可恢复</small></h5>
             <form class="form-inline" method="POST" style="margin-bottom: 5px;">
                 <p id="delimgurl"></p>
@@ -1512,7 +1682,8 @@ auto_delete(); //定时删除
     function ajax_post(url, mode) {
         $.post("../app/del.php", {
                 url: url,
-                mode: mode
+                mode: mode,
+                csrf_token: <?php echo json_encode($csrf); ?>
             },
             function(data, status) {
                 let res = JSON.parse(data);
@@ -1671,11 +1842,11 @@ auto_delete(); //定时删除
                 <?php foreach ($tokenList as $key => $value) :
                     $expired = $value['expired'] < time() ? '<p class="text-gray">已过期</p>' : '<p class="text-green">' . date('Y-m-d H:i:s', $value['expired']) . '</p>'; ?> {
                         id: '<?php echo $value['id']; ?>',
-                        token: '<input class="form-control input-sm" type="text" value="<?php echo $key; ?>" readonly>',
+                        token: '<input class="form-control input-sm" type="text" value="<?php echo htmlspecialchars($key, ENT_QUOTES, 'UTF-8'); ?>" readonly>',
                         add_time: '<?php echo date('Y-m-d H:i:s', $value['add_time']); ?>',
                         expired: '<?php echo $expired; ?>',
                         number: <?php echo get_file_by_glob(APP_ROOT . $config['path'] . $value['id'], $type = 'number'); ?>,
-                        manage: "<a href='/admin/manager.php?p=<?php echo $value['id']; ?>' target='_blank' class='btn btn-mini btn-success <?php if (!$config['token_path_status']) echo 'disabled'; ?>'>文件</a> <a href='admin.inc.php?stop_token=<?php echo $key; ?>' class='btn btn-mini btn-danger'>禁用</a> <a href='admin.inc.php?delete_token=<?php echo $key; ?>' class='btn btn-mini btn-danger'>删除</a> <a href='#' onclick=\"ajax_post('<?php echo $value['id']; ?>','delDir')\" class='btn btn-mini btn-primary <?php if (!$config['token_path_status']) echo 'disabled'; ?>'>删除上传</a>"
+                        manage: "<a href='<?php echo $config['domain']; ?>/admin/manager.php?p=<?php echo (int) $value['id']; ?>' target='_blank' class='btn btn-mini btn-success <?php if (!$config['token_path_status']) echo 'disabled'; ?>'>文件</a> <a href='admin.inc.php?stop_token=<?php echo rawurlencode($key); ?>&csrf=<?php echo $csrf; ?>' class='btn btn-mini btn-danger'>禁用</a> <a href='admin.inc.php?delete_token=<?php echo rawurlencode($key); ?>&csrf=<?php echo $csrf; ?>' class='btn btn-mini btn-danger'>删除</a> <a href='#' onclick=\"ajax_post('<?php echo (int) $value['id']; ?>','delDir')\" class='btn btn-mini btn-primary <?php if (!$config['token_path_status']) echo 'disabled'; ?>'>删除上传</a>"
                     },
                 <?php endforeach; ?>
             ]
@@ -1748,12 +1919,12 @@ auto_delete(); //定时删除
             array: [
                 <?php foreach ($guestConfig as $k => $v) :
                     $expired = $v['expired'] < time() ? '<p class="text-gray">已过期</p>' : '<p class="text-green">' . date('Y-m-d H:i:s', $v['expired']) . '</p>'; ?> {
-                        guest: '<?php echo $k; ?>',
+                        guest: '<?php echo htmlspecialchars($k, ENT_QUOTES, 'UTF-8'); ?>',
                         password: '<input class="form-control input-sm" type="text" value="<?php echo $v['password']; ?>" readonly>',
                         add_time: '<?php echo date('Y-m-d H:i:s', $v['add_time']); ?>',
                         expired: '<?php echo $expired; ?>',
                         files: <?php echo get_file_by_glob(APP_ROOT . $config['path'] . $k, $type = 'number'); ?>,
-                        manage: "<a href='/admin/manager.php?p=<?php echo $k; ?>' target='_blank' class='btn btn-mini btn-success <?php if (!$config['guest_path_status']) echo 'disabled'; ?>'>文件</a> <a href='admin.inc.php?stop_guest=<?php echo $k; ?>' class='btn btn-mini btn-danger'>禁用</a> <a class='btn btn-mini btn-danger' href='admin.inc.php?delete_guest=<?php echo $k; ?>'>删除</a> <a class='btn btn-mini btn-primary <?php if (!$config['guest_path_status']) echo 'disabled'; ?>' href='#' onclick=\"ajax_post('<?php echo $k; ?>','delDir')\">删除上传</a>",
+                        manage: "<a href='<?php echo $config['domain']; ?>/admin/manager.php?p=<?php echo rawurlencode($k); ?>' target='_blank' class='btn btn-mini btn-success <?php if (!$config['guest_path_status']) echo 'disabled'; ?>'>文件</a> <a href='admin.inc.php?stop_guest=<?php echo rawurlencode($k); ?>&csrf=<?php echo $csrf; ?>' class='btn btn-mini btn-danger'>禁用</a> <a class='btn btn-mini btn-danger' href='admin.inc.php?delete_guest=<?php echo rawurlencode($k); ?>&csrf=<?php echo $csrf; ?>'>删除</a> <a class='btn btn-mini btn-primary <?php if (!$config['guest_path_status']) echo 'disabled'; ?>' href='#' onclick=\"ajax_post('<?php echo rawurlencode($k); ?>','delDir')\">删除上传</a>",
                     },
                 <?php endforeach; ?>
             ]
@@ -1783,6 +1954,20 @@ auto_delete(); //定时删除
 
     /** 引入设置页面检测文件 */
     <?php if ($config['checkEnv']) require_once __DIR__ . '/inc.check.php'; ?>
+
+    // 安全：为页面内所有表单自动补 CSRF 令牌（跨站伪造请求无法执行本页 JS，因此拿不到令牌）
+    (function() {
+        var token = <?php echo json_encode($csrf); ?>;
+        document.querySelectorAll('form').forEach(function(form) {
+            if (!form.querySelector('input[name="csrf_token"]')) {
+                var input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = 'csrf_token';
+                input.value = token;
+                form.appendChild(input);
+            }
+        });
+    })();
 
     // 更改网页标题
     document.title = "图床设置 - <?php echo $config['title']; ?>"

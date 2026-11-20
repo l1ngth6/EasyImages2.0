@@ -1,11 +1,16 @@
 <?php
 require_once __DIR__ . '/../app/function.php';
 clearstatcache();
-// 存在程序锁则跳转主页
+// 存在程序锁或已完成安装则跳转主页
 if (file_exists(APP_ROOT . '/config/install.lock')) {
-    exit(header("Location:/../index.php"));
+    header("Location: ../index.php");
+    exit;
 }
-$phpEnv = (PHP_VERSION >= 5.6) ? true : false;
+if (!isset($config['password']) || !password_verify(EASYIMAGE_DEFAULT_PASSWORD_HASH, (string) $config['password'])) {
+    // 非默认密码说明站点已安装，给可读提示而非静默跳回（避免与首页 check.php 构成重定向环）
+    exit('<script>window.alert("站点已完成安装，如需重装请手动删除 config/install.lock 并恢复默认密码。");location.href="../index.php";</script>');
+}
+$phpEnv = (PHP_VERSION >= 7.4) ? true : false;
 $fileinfo = extension_loaded('fileinfo') ? true : false;
 $gd = extension_loaded('gd') ? true :  false;
 $openssl = extension_loaded('openssl') ? true :  false;
@@ -74,7 +79,7 @@ function checkPASS($name)
         <tbody>
             <tr>
                 <td>PHP</td>
-                <td>PHP >= 5.6</td>
+                <td>PHP >= 7.4</td>
                 <td><?php checkPASS($phpEnv); ?></td>
             </tr>
             <tr>
@@ -94,7 +99,7 @@ function checkPASS($name)
             </tr>
             <tr>
                 <td>openssl</td>
-                <td>建议支持 | 生成加密删除url,需PHP>7.0</td>
+                <td>建议支持 | 生成加密删除url,需PHP>7.4</td>
                 <td> <?php checkPASS($openssl); ?></td>
             </tr>
             <tr>
@@ -190,8 +195,8 @@ function checkPASS($name)
                 <i class="icon icon-qrcode"></i>二维码 </a>
         </div>
         <?php echo 'Copyright © 2018-' . date('Y'); ?>
-        <a href="https://png.cm/" target="_blank">EasyImage</a> By
-        <a href="https://blog.png.cm/902.html" target="_blank">Icret</a> Version:<a href="https://github.com/icret/EasyImages2.0" target="_blank"><?php echo APP_VERSION; ?></a>
+        <a href="https://calc.appsr.cn/" target="_blank">EasyImage</a> By
+        <a href="https://calc.appsr.cn/" target="_blank">Icret</a> Version:<a href="https://github.com/icret/EasyImages2.0" target="_blank"><?php echo APP_VERSION; ?></a>
     </footer>
 </body>
 
