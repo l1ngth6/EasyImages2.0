@@ -9,7 +9,7 @@ ENV TZ=Asia/Shanghai \
 # CI changes this value on every run so apt security updates are not cached.
 ARG DEPENDENCY_REFRESH=local
 RUN set -eux; \
-    php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION === 4 && version_compare(PHP_VERSION, "8.4.27", ">=") ? 0 : 1);'; \
+    php -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION === 4 && version_compare(PHP_VERSION, "8.4.28", ">=") ? 0 : 1);'; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         nginx supervisor curl ca-certificates tzdata passwd \

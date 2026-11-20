@@ -2,7 +2,7 @@
 
 本 fork 提供 Nginx + PHP-FPM 单容器镜像，支持 `linux/amd64`、`linux/arm64`。
 镜像使用当前仓库源码，基于官方 `php:8.4-fpm-bookworm`（底层是 Debian slim），
-构建及启动均要求 PHP 为 8.4 系列、补丁版本至少为 8.4.27。
+构建及启动均要求 PHP 为 8.4 系列、补丁版本至少为 8.4.28。
 
 镜像地址：`ghcr.io/l1ngth6/easyimages2.0`。
 只有发布工作流成功后，文档中的镜像标签才可拉取。

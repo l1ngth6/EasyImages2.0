@@ -1,7 +1,7 @@
 <?php
 // Used during image build, at startup, and by CI. No application files are loaded.
-if (PHP_MAJOR_VERSION !== 8 || PHP_MINOR_VERSION !== 4 || version_compare(PHP_VERSION, '8.4.27', '<')) {
-    fwrite(STDERR, "PHP 8.4.27 or a newer PHP 8.4 patch release is required.\n");
+if (PHP_MAJOR_VERSION !== 8 || PHP_MINOR_VERSION !== 4 || version_compare(PHP_VERSION, '8.4.28', '<')) {
+    fwrite(STDERR, "PHP 8.4.28 or a newer PHP 8.4 patch release is required.\n");
     exit(1);
 }
 
